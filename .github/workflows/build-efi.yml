@@ -1,0 +1,99 @@
+name: Build OpenCore starter EFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Starter SMBIOS profile (must be reviewed)"
+        type: choice
+        options: [desktop, laptop]
+        default: desktop
+      intel_graphics:
+        description: "Include WhateverGreen (not a universal GPU driver)"
+        type: boolean
+        default: true
+      audio:
+        description: "Include AppleALC"
+        type: boolean
+        default: true
+      intel_ethernet:
+        description: "Include IntelMausi"
+        type: boolean
+        default: false
+      nvme:
+        description: "Include NVMeFix"
+        type: boolean
+        default: false
+  push:
+    paths: ["builder.py", "tests/**", ".github/workflows/build-efi.yml"]
+  pull_request:
+    paths: ["builder.py", "tests/**", ".github/workflows/build-efi.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+  build:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build starter EFI
+        env:
+          PROFILE: ${{ inputs.profile }}
+          INTEL_GRAPHICS: ${{ inputs.intel_graphics }}
+          AUDIO: ${{ inputs.audio }}
+          INTEL_ETHERNET: ${{ inputs.intel_ethernet }}
+          NVME: ${{ inputs.nvme }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          cmd = [sys.executable, "builder.py", "--profile", os.getenv("PROFILE") or "desktop", "--output", "dist"]
+          features = {
+              "INTEL_GRAPHICS": "intel-graphics",
+              "AUDIO": "audio",
+              "INTEL_ETHERNET": "intel-ethernet",
+              "NVME": "nvme",
+          }
+          selected = [feature for flag, feature in features.items() if os.getenv(flag, "false").lower() == "true"]
+          if selected:
+              cmd += ["--features", *selected]
+          subprocess.check_call(cmd)
+          PY
+      - name: Check plist syntax and referenced files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import plistlib
+          root = Path("dist/EFI/OC")
+          cfg = plistlib.loads((root / "config.plist").read_bytes())
+          for k in cfg["Kernel"]["Add"]:
+              if k["Enabled"]:
+                  assert (root / "Kexts" / k["BundlePath"] / k["PlistPath"]).exists()
+                  if k["ExecutablePath"]:
+                      assert (root / "Kexts" / k["BundlePath"] / k["ExecutablePath"]).exists()
+          for d in cfg["UEFI"]["Drivers"]:
+              if d["Enabled"]:
+                  assert (root / "Drivers" / d["Path"]).is_file()
+          assert cfg["PlatformInfo"]["Generic"]["SystemSerialNumber"] == "REPLACE_ME"
+          print("Starter EFI file references checked (not an ocvalidate or boot test)")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenCore-starter-EFI
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
